@@ -58,7 +58,7 @@ use ratatui::text::Line;
 
 use crate::clipboard::copy_to_clipboard;
 use crate::selection;
-use crate::wrapcache::{PanelWrap, TextPos};
+use crate::wrapcache::{PanelWrap, TextPos, WrapMode};
 
 /// How [`SelectablePanel::handle_mouse`] should behave. Every field is a
 /// per-application choice, so different consumers can wire the same panel up
@@ -108,6 +108,8 @@ pub enum MouseAction {
 #[derive(Default)]
 pub struct SelectablePanel {
     wrap: Option<PanelWrap>,
+    /// How raw lines wider than the panel are laid out (wrap vs clip).
+    mode: WrapMode,
     /// `(anchor, cursor)` in logical positions. The anchor is where the
     /// selection started (mouse-down); the cursor is its live end (drag).
     selection: Option<(TextPos, TextPos)>,
@@ -119,14 +121,40 @@ impl SelectablePanel {
         Self::default()
     }
 
+    /// Choose how raw lines wider than the panel are laid out — [`WrapMode::Wrap`]
+    /// (the default) breaks them onto multiple rows, [`WrapMode::Clip`] renders
+    /// each raw line on exactly one row and clips the overflow. Takes effect on
+    /// the next [`set_content`](Self::set_content) call (which apps make every
+    /// frame).
+    pub fn set_wrap_mode(&mut self, mode: WrapMode) {
+        self.mode = mode;
+    }
+
+    /// This panel's current [`WrapMode`].
+    pub fn wrap_mode(&self) -> WrapMode {
+        self.mode
+    }
+
     /// Set (or update) the panel's text and the inner width it wraps to, in
     /// columns. A no-op when neither the text (by `Arc` identity) nor the
-    /// width changed, so it's safe — and intended — to call every frame.
+    /// width (nor the [`WrapMode`]) changed, so it's safe — and intended — to
+    /// call every frame.
     ///
     /// Pass a fresh `Arc<str>` whenever the underlying text changes; identity
     /// (not byte comparison) is what signals "content changed".
     pub fn set_content(&mut self, text: Arc<str>, width: usize) {
-        PanelWrap::rebuild_if_needed(&mut self.wrap, &text, width);
+        PanelWrap::rebuild_if_needed_with(&mut self.wrap, &text, width, self.mode);
+    }
+
+    /// Set (or update) the panel's text from a string that may contain ANSI
+    /// escape sequences: rendered rows ([`visible_rows`](Self::visible_rows))
+    /// keep their colour, while selection, copy and geometry operate on the
+    /// plain, stripped text. Otherwise identical to
+    /// [`set_content`](Self::set_content) (safe to call every frame; honours
+    /// the current [`WrapMode`]). Requires the `ansi` feature.
+    #[cfg(feature = "ansi")]
+    pub fn set_ansi_content(&mut self, text: Arc<str>, width: usize) {
+        PanelWrap::rebuild_if_needed_ansi(&mut self.wrap, &text, width, self.mode);
     }
 
     /// Whether any content has been set yet.
@@ -473,5 +501,27 @@ mod tests {
             MouseAction::Ignored
         );
         assert!(!p.has_selection());
+    }
+
+    #[test]
+    fn clip_mode_keeps_one_row_per_line_and_selects_visible_columns() {
+        let mut p = SelectablePanel::new();
+        p.set_wrap_mode(WrapMode::Clip);
+        assert_eq!(p.wrap_mode(), WrapMode::Clip);
+        // Two lines; the first is wider than the width but stays one row.
+        p.set_content(Arc::from("hello world foo\nsecond line"), 10);
+        assert_eq!(p.total_rows(), 2, "one row per raw line in clip mode");
+
+        let area = Rect::new(2, 1, 10, 5);
+        // Select "hello" on the first (clipped) row.
+        p.begin_selection(area, 0, (2, 1)); // col 0 -> 'h'
+        p.extend_selection(area, 0, (6, 1)); // col 4 -> 'o'
+        assert_eq!(p.selected_text().as_deref(), Some("hello"));
+        let cells = p.highlight_cells(area, 0);
+        assert_eq!(cells, vec![(1, 2, 7)], "a single clipped highlight row");
+
+        // A drag onto the row below lands on line 1 (rows map 1:1 to lines).
+        p.extend_selection(area, 0, (4, 2)); // row below -> line 1, col 2
+        assert_eq!(p.selected_text().as_deref(), Some("hello world foo\nsec"));
     }
 }

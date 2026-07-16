@@ -108,6 +108,42 @@ ratatui::restore();
 Disable the `terminal-guard` feature (`default-features = false`) if you only
 want the pure selection/wrapping logic without the process-global panic hook.
 
+## Line layout: wrap or clip (`WrapMode`)
+
+By default each raw line wider than the panel is **wrapped** onto multiple rows.
+For panels that show pre-formatted, column-aligned output (e.g. program output
+echoed verbatim), call `set_wrap_mode(WrapMode::Clip)` instead: every raw line
+then occupies exactly one screen row and anything past the right edge is
+clipped. Selection, copy and scrolling all follow suit (scrolling moves by whole
+lines, one row per line).
+
+```rust
+# use tui_panel_select::{SelectablePanel, WrapMode};
+let mut panel = SelectablePanel::new();
+panel.set_wrap_mode(WrapMode::Clip);
+```
+
+## ANSI-coloured content (feature `ansi`, off by default)
+
+If your panel text contains ANSI escape sequences (e.g. coloured program
+output), enable the `ansi` feature and feed it via `set_ansi_content` instead of
+`set_content`. Rendered rows (`visible_rows`) keep their colour, while
+selection, copy and all geometry operate on the plain, **stripped** text — so
+you don't have to maintain a second, un-coloured copy yourself:
+
+```toml
+tui-panel-select = { version = "0.1", features = ["ansi"] }
+```
+
+```rust,no_run
+# use std::sync::Arc;
+# use tui_panel_select::{SelectablePanel, WrapMode};
+# fn demo(panel: &mut SelectablePanel, colored: Arc<str>, width: usize) {
+panel.set_wrap_mode(WrapMode::Clip);      // often paired with clip for verbatim output
+panel.set_ansi_content(colored, width);   // escapes parsed once, colour preserved
+# }
+```
+
 ## Low-level primitives
 
 If your app already owns its selection state (e.g. multiple simultaneous

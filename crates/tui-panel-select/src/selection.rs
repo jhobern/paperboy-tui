@@ -17,7 +17,7 @@
 
 use ratatui::layout::Rect;
 
-use crate::wrapcache::{PanelWrap, TextPos};
+use crate::wrapcache::{PanelWrap, TextPos, WrapMode};
 
 /// Order two positions so the first is not after the second (a selection
 /// dragged "backwards" — up or left — still resolves correctly).
@@ -186,7 +186,9 @@ pub fn highlight_cells(
         let len = wrap.line_char_len(line);
         let width = area.width as usize;
         let (base_row, _) = wrap.textpos_to_row_col(TextPos::new(line, 0));
-        let rows_in_line = if width == 0 {
+        // In clip mode each raw line is exactly one (clipped) row.
+        let rows_in_line = if wrap.mode() == WrapMode::Clip || width == 0 {
+            // Clip mode collapses each raw line to a single (clipped) row.
             1
         } else {
             len.div_ceil(width).max(1)

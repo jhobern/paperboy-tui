@@ -13,3 +13,4 @@ authors = ["Jonathan Hobern <jhobern@gmail.com>"]
 [workspace.dependencies]
 ratatui = "0.30.2"
 base64 = "0.22"
+ansi-to-tui = "8.0"
