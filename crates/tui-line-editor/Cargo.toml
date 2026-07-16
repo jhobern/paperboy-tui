@@ -1,0 +1,14 @@
+[package]
+name = "tui-line-editor"
+version = "0.1.0"
+description = "A small single- or multi-line text editor primitive (with selection and masking) for ratatui apps"
+keywords = ["ratatui", "tui", "editor", "input", "textarea"]
+categories = ["command-line-interface"]
+readme = "README.md"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+ratatui.workspace = true

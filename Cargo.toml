@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# Shared metadata inherited by each crate via `field.workspace = true`.
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/jhobern/paperboy-tui"
+authors = ["Jonathan Hobern <jhobern@gmail.com>"]
+
+# Shared dependency versions, referenced by each crate via `dep.workspace = true`.
+[workspace.dependencies]
+ratatui = "0.30.2"
+base64 = "0.22"

@@ -1,0 +1,22 @@
+[package]
+name = "tui-panel-select"
+version = "0.1.0"
+description = "Panel-scoped mouse text selection and clipboard copy for ratatui apps"
+keywords = ["ratatui", "tui", "selection", "clipboard", "terminal"]
+categories = ["command-line-interface"]
+readme = "README.md"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+ratatui.workspace = true
+base64.workspace = true
+
+[features]
+default = ["terminal-guard"]
+# Opt-in (default-on) panic-safe terminal mouse-capture guard. Disable it if
+# you only want the pure selection/wrapping logic and would rather not pull in
+# the process-global panic-hook and terminal side effects.
+terminal-guard = []

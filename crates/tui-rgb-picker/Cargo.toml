@@ -1,0 +1,14 @@
+[package]
+name = "tui-rgb-picker"
+version = "0.1.0"
+description = "A small, configurable RGB colour picker widget (channel sliders) for ratatui apps"
+keywords = ["ratatui", "tui", "color", "picker", "rgb"]
+categories = ["command-line-interface"]
+readme = "README.md"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+ratatui.workspace = true
