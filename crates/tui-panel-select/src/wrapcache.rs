@@ -15,10 +15,94 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::wrap::{wrap_line, wrap_line_window, wrapped_row_count};
+
+/// A purely-visual end-of-row marker drawn in a reserved rightmost column on
+/// every *continued* wrapped row (a row that a raw line wrapped past — i.e.
+/// not the last row of that line), so a soft wrap is visually distinct from a
+/// real line break. Opt-in via [`SelectablePanel::set_wrap_marker`] /
+/// [`PanelWrap`]'s builders; only meaningful in [`WrapMode::Wrap`].
+///
+/// The marker occupies its own column: when enabled, lines wrap to one column
+/// narrower than the panel so the last column is free for the glyph. Because
+/// all selection and copy geometry keys off that reduced wrap width, the
+/// marker column never maps to a character — it is automatically excluded from
+/// highlighting and from copied text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WrapMarker {
+    /// The glyph drawn in the reserved column (e.g. a chevron `›` or a
+    /// return arrow `↵`). Must be a single terminal cell wide.
+    pub glyph: char,
+    /// The style the glyph is drawn with — typically a dim / greyed-out style
+    /// so it reads as an annotation rather than content.
+    pub style: Style,
+}
+
+impl Default for WrapMarker {
+    /// A dim, dark-grey return-arrow (`↵`) — a conventional soft-wrap
+    /// indicator. Override [`glyph`](Self::glyph) with a chevron (`›`) or any
+    /// other single-cell glyph, and [`style`](Self::style) to taste.
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
+
+impl WrapMarker {
+    pub fn builder() -> WraperMarkerBuilder {
+        WraperMarkerBuilder {
+            glyph: '↵',
+            style: Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        }
+    }
+}
+
+/// Builder struct for `WrapMarker`
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WraperMarkerBuilder {
+    /// The glyph drawn in the reserved column (e.g. a chevron `›` or a
+    /// return arrow `↵`). Must be a single terminal cell wide.
+    pub glyph: char,
+    /// The style the glyph is drawn with — typically a dim / greyed-out style
+    /// so it reads as an annotation rather than content.
+    pub style: Style,
+}
+
+impl WraperMarkerBuilder {
+    pub fn build(self) -> WrapMarker {
+        WrapMarker {
+            glyph: self.glyph,
+            style: self.style,
+        }
+    }
+
+    /// Setter for `style``
+    pub fn style(mut self, style: Style) -> WraperMarkerBuilder {
+        self.style = style;
+        self
+    }
+
+    /// Setter for `glyph`
+    pub fn glyph(mut self, glyph: char) -> WraperMarkerBuilder {
+        self.glyph = glyph;
+        self
+    }
+}
+
+/// The width lines actually wrap to, given the panel's inner `width`, its
+/// layout `mode` and whether a [`WrapMarker`] is reserving a column. A marker
+/// steals the rightmost column (so `width - 1`), but only in [`WrapMode::Wrap`]
+/// and only when there's a spare column to give up (`width >= 2`); otherwise
+/// the full `width` is used.
+fn effective_wrap_width(width: usize, mode: WrapMode, has_marker: bool) -> usize {
+    if has_marker && mode == WrapMode::Wrap && width >= 2 {
+        width - 1
+    } else {
+        width
+    }
+}
 
 /// How a panel lays out raw lines wider than its inner width.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -127,7 +211,16 @@ pub struct PanelWrap {
     line_ranges: Vec<(usize, usize)>,
     rows: LineRows,
     width: usize,
+    /// The width lines actually wrap to — `width`, less one column when a
+    /// [`WrapMarker`] reserves the rightmost column (see
+    /// [`effective_wrap_width`]). All geometry, selection and highlight math
+    /// use this, never the raw panel `width`, so the reserved marker column is
+    /// consistently excluded.
+    wrap_width: usize,
     mode: WrapMode,
+    /// The end-of-row wrap marker, if enabled. Purely a rendering concern
+    /// (geometry only cares *whether* a column is reserved, via `wrap_width`).
+    marker: Option<WrapMarker>,
     /// Per-line style runs `(char_from, char_to_exclusive, style)` for ANSI
     /// content, aligned to `source`'s characters; `None` for plain text
     /// (rendered without styling). Only ever populated via the `ansi`
@@ -153,12 +246,25 @@ impl PanelWrap {
 
     /// Build fresh from plain `source` with an explicit [`WrapMode`].
     pub fn build_with(source: Arc<str>, width: usize, mode: WrapMode) -> Self {
+        Self::build_with_marker(source, width, mode, None)
+    }
+
+    /// Build fresh from plain `source` with an explicit [`WrapMode`] and an
+    /// optional end-of-row [`WrapMarker`] (which reserves the rightmost
+    /// column, narrowing the wrap width by one).
+    pub fn build_with_marker(
+        source: Arc<str>,
+        width: usize,
+        mode: WrapMode,
+        marker: Option<WrapMarker>,
+    ) -> Self {
+        let wrap_width = effective_wrap_width(width, mode, marker.is_some());
         let line_ranges = Self::split_line_ranges(&source);
         let rows = LineRows::build(
             line_ranges
                 .iter()
                 .map(|&(s, e)| source[s..e].chars().count()),
-            width,
+            wrap_width,
             mode,
         );
         Self {
@@ -167,7 +273,9 @@ impl PanelWrap {
             line_ranges,
             rows,
             width,
+            wrap_width,
             mode,
+            marker,
             line_styles: None,
             last_window: RefCell::new(None),
         }
@@ -201,6 +309,19 @@ impl PanelWrap {
     /// colour is purely a rendering concern. Requires the `ansi` feature.
     #[cfg(feature = "ansi")]
     pub fn build_ansi(raw: Arc<str>, width: usize, mode: WrapMode) -> Self {
+        Self::build_ansi_with_marker(raw, width, mode, None)
+    }
+
+    /// Build fresh from ANSI-coloured `raw` with an explicit [`WrapMode`] and
+    /// an optional end-of-row [`WrapMarker`]. Requires the `ansi` feature.
+    #[cfg(feature = "ansi")]
+    pub fn build_ansi_with_marker(
+        raw: Arc<str>,
+        width: usize,
+        mode: WrapMode,
+        marker: Option<WrapMarker>,
+    ) -> Self {
+        let wrap_width = effective_wrap_width(width, mode, marker.is_some());
         let (plain_lines, styles) = parse_ansi(&raw);
         let source: Arc<str> = Arc::from(plain_lines.join("\n"));
         // Byte ranges built directly from the plain lines we just produced, so
@@ -216,14 +337,20 @@ impl PanelWrap {
         if line_ranges.is_empty() {
             line_ranges.push((0, 0));
         }
-        let rows = LineRows::build(plain_lines.iter().map(|l| l.chars().count()), width, mode);
+        let rows = LineRows::build(
+            plain_lines.iter().map(|l| l.chars().count()),
+            wrap_width,
+            mode,
+        );
         Self {
             raw,
             source,
             line_ranges,
             rows,
             width,
+            wrap_width,
             mode,
+            marker,
             line_styles: Some(styles),
             last_window: RefCell::new(None),
         }
@@ -247,17 +374,36 @@ impl PanelWrap {
         width: usize,
         mode: WrapMode,
     ) {
+        Self::rebuild_if_needed_marker(cache, source, width, mode, None);
+    }
+
+    /// Like [`rebuild_if_needed_with`](Self::rebuild_if_needed_with) but also
+    /// carrying an optional end-of-row [`WrapMarker`]. Rebuilds if the marker
+    /// changed (it affects the reserved column and thus the wrap geometry).
+    pub fn rebuild_if_needed_marker(
+        cache: &mut Option<PanelWrap>,
+        source: &Arc<str>,
+        width: usize,
+        mode: WrapMode,
+        marker: Option<WrapMarker>,
+    ) {
         let stale = match cache {
             Some(c) => {
                 !Arc::ptr_eq(&c.raw, source)
                     || c.width != width
                     || c.mode != mode
+                    || c.marker != marker
                     || c.line_styles.is_some()
             }
             None => true,
         };
         if stale {
-            *cache = Some(PanelWrap::build_with(Arc::clone(source), width, mode));
+            *cache = Some(PanelWrap::build_with_marker(
+                Arc::clone(source),
+                width,
+                mode,
+                marker,
+            ));
         }
     }
 
@@ -271,23 +417,56 @@ impl PanelWrap {
         width: usize,
         mode: WrapMode,
     ) {
+        Self::rebuild_if_needed_ansi_marker(cache, raw, width, mode, None);
+    }
+
+    /// Like [`rebuild_if_needed_ansi`](Self::rebuild_if_needed_ansi) but also
+    /// carrying an optional end-of-row [`WrapMarker`]. Requires the `ansi`
+    /// feature.
+    #[cfg(feature = "ansi")]
+    pub fn rebuild_if_needed_ansi_marker(
+        cache: &mut Option<PanelWrap>,
+        raw: &Arc<str>,
+        width: usize,
+        mode: WrapMode,
+        marker: Option<WrapMarker>,
+    ) {
         let stale = match cache {
             Some(c) => {
                 !Arc::ptr_eq(&c.raw, raw)
                     || c.width != width
                     || c.mode != mode
+                    || c.marker != marker
                     || c.line_styles.is_none()
             }
             None => true,
         };
         if stale {
-            *cache = Some(PanelWrap::build_ansi(Arc::clone(raw), width, mode));
+            *cache = Some(PanelWrap::build_ansi_with_marker(
+                Arc::clone(raw),
+                width,
+                mode,
+                marker,
+            ));
         }
     }
 
     /// This panel's line-layout mode.
     pub fn mode(&self) -> WrapMode {
         self.mode
+    }
+
+    /// The width lines actually wrap to — the panel's inner width, less one
+    /// column when a [`WrapMarker`] reserves the rightmost column. Selection
+    /// and highlight geometry must use this, not the raw panel width, so the
+    /// reserved marker column is excluded.
+    pub fn wrap_width(&self) -> usize {
+        self.wrap_width
+    }
+
+    /// This panel's end-of-row wrap marker, if any.
+    pub fn marker(&self) -> Option<WrapMarker> {
+        self.marker
     }
 
     pub fn line_count(&self) -> usize {
@@ -350,20 +529,47 @@ impl PanelWrap {
                 break;
             }
             let budget = height_usize - out.len();
-            if self.line_styles.is_none() {
-                out.extend(wrap_line_window(
-                    self.line_text(idx),
-                    self.width,
-                    skip,
-                    budget,
-                ));
+            let mut rows = if self.line_styles.is_none() {
+                wrap_line_window(self.line_text(idx), self.wrap_width, skip, budget)
             } else {
-                out.extend(self.wrap_line_window_styled(idx, skip, budget));
-            }
+                self.wrap_line_window_styled(idx, skip, budget)
+            };
+            // Annotate every *continued* row of this line (any row but its
+            // last) with the end-of-row wrap marker. `skip` is the first
+            // row-in-line this window covers, so the k-th produced row is
+            // row-in-line `skip + k`; it is continued when another row of the
+            // same line follows it.
+            self.mark_continued_rows(idx, skip, &mut rows);
+            out.extend(rows);
             skip = 0;
         }
         out.truncate(height_usize);
         out
+    }
+
+    /// Append the [`WrapMarker`] glyph to each row of `rows` that is a
+    /// *continued* wrapped row of raw line `idx` — i.e. not that line's last
+    /// row. `first_row` is the row-in-line index the first element of `rows`
+    /// corresponds to. A no-op when no marker is configured or no column was
+    /// actually reserved for it (a too-narrow panel).
+    fn mark_continued_rows(&self, idx: usize, first_row: usize, rows: &mut [Line<'static>]) {
+        let Some(marker) = self.marker else {
+            return;
+        };
+        // Only draw when a column was genuinely reserved (see
+        // `effective_wrap_width`); otherwise there is nowhere to put the glyph
+        // without overwriting content.
+        if self.wrap_width >= self.width {
+            return;
+        }
+        let total_in_line = wrapped_row_count(self.line_char_len(idx), self.wrap_width);
+        for (k, line) in rows.iter_mut().enumerate() {
+            let row_in_line = first_row + k;
+            if row_in_line + 1 < total_in_line {
+                line.spans
+                    .push(Span::styled(marker.glyph.to_string(), marker.style));
+            }
+        }
     }
 
     /// [`WrapMode::Clip`] window: one row per raw line, each clipped to
@@ -395,7 +601,7 @@ impl PanelWrap {
         if max_rows == 0 {
             return Vec::new();
         }
-        if self.width == 0 {
+        if self.wrap_width == 0 {
             return if skip_rows == 0 {
                 vec![Line::from(self.styled_spans(
                     idx,
@@ -406,13 +612,13 @@ impl PanelWrap {
                 Vec::new()
             };
         }
-        let c0 = skip_rows.saturating_mul(self.width);
-        let c1 = c0.saturating_add(max_rows.saturating_mul(self.width));
+        let c0 = skip_rows.saturating_mul(self.wrap_width);
+        let c1 = c0.saturating_add(max_rows.saturating_mul(self.wrap_width));
         let spans = self.styled_spans(idx, c0, c1);
         if spans.is_empty() {
             return Vec::new();
         }
-        wrap_line(Line::from(spans), self.width)
+        wrap_line(Line::from(spans), self.wrap_width)
     }
 
     /// The styled spans for characters `[c0, c1)` of raw line `idx`. Plain
@@ -469,12 +675,12 @@ impl PanelWrap {
         let col = pos.col.min(len);
         // In clip mode every raw line is exactly one row, so the row is just
         // the line's cumulative index and the column maps straight through.
-        if self.mode == WrapMode::Clip || self.width == 0 {
+        if self.mode == WrapMode::Clip || self.wrap_width == 0 {
             return (self.rows.cum[line], col);
         }
-        let rows_in_line = wrapped_row_count(len, self.width) as u32;
-        let row_in_line = ((col / self.width) as u32).min(rows_in_line.saturating_sub(1));
-        let col_in_row = col.saturating_sub(row_in_line as usize * self.width);
+        let rows_in_line = wrapped_row_count(len, self.wrap_width) as u32;
+        let row_in_line = ((col / self.wrap_width) as u32).min(rows_in_line.saturating_sub(1));
+        let col_in_row = col.saturating_sub(row_in_line as usize * self.wrap_width);
         (self.rows.cum[line] + row_in_line, col_in_row)
     }
 
@@ -488,10 +694,10 @@ impl PanelWrap {
         }
         let (line, row_in_line) = self.rows.locate(row);
         let len = self.line_char_len(line);
-        let base = if self.width == 0 {
+        let base = if self.wrap_width == 0 {
             0
         } else {
-            row_in_line as usize * self.width
+            row_in_line as usize * self.wrap_width
         };
         // `col` may be `usize::MAX` (callers use this to mean "clamp to the
         // end of the line", e.g. auto-scroll snapping the selection cursor

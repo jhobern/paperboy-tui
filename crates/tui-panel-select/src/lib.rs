@@ -41,4 +41,4 @@ pub mod wrapcache;
 pub use panel::{MouseAction, MouseConfig, SelectablePanel};
 #[cfg(feature = "terminal-guard")]
 pub use terminal::TerminalGuard;
-pub use wrapcache::{PanelWrap, TextPos, WrapMode};
+pub use wrapcache::{PanelWrap, TextPos, WrapMarker, WrapMode};

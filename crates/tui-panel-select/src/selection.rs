@@ -184,7 +184,11 @@ pub fn highlight_cells(
             continue;
         }
         let len = wrap.line_char_len(line);
-        let width = area.width as usize;
+        // Use the panel's *wrap* width (which excludes any column reserved for
+        // an end-of-row wrap marker), not `area.width` — the marker column is
+        // never part of the selectable text, so highlight geometry must match
+        // where characters actually wrap.
+        let width = wrap.wrap_width();
         let (base_row, _) = wrap.textpos_to_row_col(TextPos::new(line, 0));
         // In clip mode each raw line is exactly one (clipped) row.
         let rows_in_line = if wrap.mode() == WrapMode::Clip || width == 0 {

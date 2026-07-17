@@ -123,6 +123,19 @@ let mut panel = SelectablePanel::new();
 panel.set_wrap_mode(WrapMode::Clip);
 ```
 
+## End of line wrap marker (`WrapMarker)
+
+There is an optional `WrapMarker` that can be added to a `SelectablePanel`. The
+`WrapMarker` can be built with the `WrapMarkerBuilder` like so:
+
+```rust
+# use tui_panel_select::{SelectablePanel, WrapMode, WrapMarker};
+let mut panel = SelectablePanel::new();
+panel.set_wrap_mode(WrapMode::Wrap);
+let wrap_marker = WrapMarker::builder().glyph('>').build();
+panel.set_wrap_marker(wrap_marker);
+```
+
 ## ANSI-coloured content (feature `ansi`, off by default)
 
 If your panel text contains ANSI escape sequences (e.g. coloured program

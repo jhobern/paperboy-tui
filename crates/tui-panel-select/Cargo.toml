@@ -1,6 +1,6 @@
 [package]
 name = "tui-panel-select"
-version = "0.1.1"
+version = "0.1.2"
 description = "Panel-scoped mouse text selection and clipboard copy for ratatui apps"
 keywords = ["ratatui", "tui", "selection", "clipboard", "terminal"]
 categories = ["command-line-interface"]

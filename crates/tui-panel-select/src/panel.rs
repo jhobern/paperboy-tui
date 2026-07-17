@@ -58,7 +58,7 @@ use ratatui::text::Line;
 
 use crate::clipboard::copy_to_clipboard;
 use crate::selection;
-use crate::wrapcache::{PanelWrap, TextPos, WrapMode};
+use crate::wrapcache::{PanelWrap, TextPos, WrapMarker, WrapMode};
 
 /// How [`SelectablePanel::handle_mouse`] should behave. Every field is a
 /// per-application choice, so different consumers can wire the same panel up
@@ -110,6 +110,9 @@ pub struct SelectablePanel {
     wrap: Option<PanelWrap>,
     /// How raw lines wider than the panel are laid out (wrap vs clip).
     mode: WrapMode,
+    /// Optional end-of-row wrap marker (a dim chevron/arrow in a reserved
+    /// rightmost column on continued rows). `None` disables it (the default).
+    marker: Option<WrapMarker>,
     /// `(anchor, cursor)` in logical positions. The anchor is where the
     /// selection started (mouse-down); the cursor is its live end (drag).
     selection: Option<(TextPos, TextPos)>,
@@ -135,6 +138,28 @@ impl SelectablePanel {
         self.mode
     }
 
+    /// Enable or disable the end-of-row wrap marker — a dim glyph (a chevron
+    /// `›`, a return arrow `↵`, …) drawn in a reserved rightmost column on
+    /// every *continued* wrapped row, so a soft wrap reads differently from a
+    /// real line break. Pass `Some(WrapMarker { .. })` to enable it (start
+    /// from [`WrapMarker::default`] and override the glyph/style), or `None`
+    /// to disable it (the default).
+    ///
+    /// Only meaningful in [`WrapMode::Wrap`]. When enabled, lines wrap to one
+    /// column narrower than the panel to make room for the glyph; because all
+    /// selection and copy geometry keys off that reduced wrap width, the
+    /// marker column is automatically excluded from highlighting and from
+    /// copied text. Takes effect on the next [`set_content`](Self::set_content)
+    /// call (which apps make every frame).
+    pub fn set_wrap_marker(&mut self, marker: Option<WrapMarker>) {
+        self.marker = marker;
+    }
+
+    /// This panel's current end-of-row wrap marker, if any.
+    pub fn wrap_marker(&self) -> Option<WrapMarker> {
+        self.marker
+    }
+
     /// Set (or update) the panel's text and the inner width it wraps to, in
     /// columns. A no-op when neither the text (by `Arc` identity) nor the
     /// width (nor the [`WrapMode`]) changed, so it's safe — and intended — to
@@ -143,7 +168,7 @@ impl SelectablePanel {
     /// Pass a fresh `Arc<str>` whenever the underlying text changes; identity
     /// (not byte comparison) is what signals "content changed".
     pub fn set_content(&mut self, text: Arc<str>, width: usize) {
-        PanelWrap::rebuild_if_needed_with(&mut self.wrap, &text, width, self.mode);
+        PanelWrap::rebuild_if_needed_marker(&mut self.wrap, &text, width, self.mode, self.marker);
     }
 
     /// Set (or update) the panel's text from a string that may contain ANSI
@@ -154,7 +179,13 @@ impl SelectablePanel {
     /// the current [`WrapMode`]). Requires the `ansi` feature.
     #[cfg(feature = "ansi")]
     pub fn set_ansi_content(&mut self, text: Arc<str>, width: usize) {
-        PanelWrap::rebuild_if_needed_ansi(&mut self.wrap, &text, width, self.mode);
+        PanelWrap::rebuild_if_needed_ansi_marker(
+            &mut self.wrap,
+            &text,
+            width,
+            self.mode,
+            self.marker,
+        );
     }
 
     /// Whether any content has been set yet.
