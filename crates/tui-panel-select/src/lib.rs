@@ -17,6 +17,9 @@
 //! selection state into one object with a tiny API — `set_content`,
 //! `begin_selection`, `extend_selection`, `selected_text`, `copy_selection`,
 //! `highlight_cells`, `visible_rows`. See its module for a worked example.
+//! [`MultiSelectPanel`] is a richer sibling for panels that need **multiple
+//! selection regions**, **keyboard extension**, **owned scrolling with drag
+//! auto-scroll**, and **styled (syntax-highlighted) content**.
 //!
 //! **Primitives:** if your app already owns its selection state (e.g. you
 //! support multiple simultaneous selections or keyboard extension), use the
@@ -31,6 +34,7 @@
 //! [ratatui]: https://docs.rs/ratatui
 
 pub mod clipboard;
+pub mod multiselect;
 pub mod panel;
 pub mod selection;
 #[cfg(feature = "terminal-guard")]
@@ -38,6 +42,7 @@ pub mod terminal;
 pub mod wrap;
 pub mod wrapcache;
 
+pub use multiselect::{AutoScroll, Motion, MultiSelectPanel};
 pub use panel::{MouseAction, MouseConfig, SelectablePanel};
 #[cfg(feature = "terminal-guard")]
 pub use terminal::TerminalGuard;

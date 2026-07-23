@@ -356,6 +356,85 @@ impl PanelWrap {
         }
     }
 
+    /// Build fresh from pre-styled ratatui [`Line`]s — e.g. syntax-highlighted
+    /// source or a diff — wrapping long lines ([`WrapMode::Wrap`]). Each span's
+    /// style is recorded as a per-line style run, exactly like the ANSI path,
+    /// but taking styled [`Line`]s directly instead of parsing escape
+    /// sequences (so no `ansi` feature is required). All geometry, selection
+    /// and copy operate on the plain, concatenated text; styling is purely a
+    /// rendering concern.
+    ///
+    /// The input `Line`s are consumed only to extract their text and styles —
+    /// they are not retained — so any lifetime is accepted. As styled content
+    /// is typically recomputed each frame (there is no stable `Arc` identity to
+    /// diff against), call this only when the content actually changed.
+    pub fn build_styled(lines: &[Line<'_>], width: usize) -> Self {
+        Self::build_styled_with_marker(lines, width, WrapMode::Wrap, None)
+    }
+
+    /// Like [`build_styled`](Self::build_styled) but with an explicit
+    /// [`WrapMode`] and an optional end-of-row [`WrapMarker`].
+    pub fn build_styled_with_marker(
+        lines: &[Line<'_>],
+        width: usize,
+        mode: WrapMode,
+        marker: Option<WrapMarker>,
+    ) -> Self {
+        let wrap_width = effective_wrap_width(width, mode, marker.is_some());
+        let mut plain_lines: Vec<String> = Vec::with_capacity(lines.len().max(1));
+        let mut styles: LineStyles = Vec::with_capacity(lines.len().max(1));
+        for line in lines {
+            let mut text = String::new();
+            let mut runs: Vec<(usize, usize, Style)> = Vec::new();
+            let mut char_pos = 0usize;
+            for span in &line.spans {
+                let n = span.content.chars().count();
+                if n == 0 {
+                    continue;
+                }
+                text.push_str(&span.content);
+                runs.push((char_pos, char_pos + n, span.style));
+                char_pos += n;
+            }
+            plain_lines.push(text);
+            styles.push(runs);
+        }
+        // Match the plain/ANSI paths: at least one (empty) line so geometry is
+        // always well-defined.
+        if plain_lines.is_empty() {
+            plain_lines.push(String::new());
+            styles.push(Vec::new());
+        }
+        let source: Arc<str> = Arc::from(plain_lines.join("\n"));
+        // Byte ranges built directly from the plain lines we just produced, so
+        // they stay exactly aligned with `styles` (one entry per line).
+        let mut line_ranges = Vec::with_capacity(plain_lines.len());
+        let mut pos = 0usize;
+        for line in &plain_lines {
+            let start = pos;
+            let end = start + line.len();
+            line_ranges.push((start, end));
+            pos = end + 1; // skip the '\n' the join inserts
+        }
+        let rows = LineRows::build(
+            plain_lines.iter().map(|l| l.chars().count()),
+            wrap_width,
+            mode,
+        );
+        Self {
+            raw: Arc::clone(&source),
+            source,
+            line_ranges,
+            rows,
+            width,
+            wrap_width,
+            mode,
+            marker,
+            line_styles: Some(styles),
+            last_window: RefCell::new(None),
+        }
+    }
+
     /// Rebuild only if `source`'s identity (by pointer — a new response/edit
     /// always produces a fresh allocation) or `width` differ from what's
     /// cached; otherwise this is a no-op, keeping repeated frames (drags,
@@ -963,6 +1042,52 @@ mod tests {
         let source2: Arc<str> = Arc::from("hello\nworld");
         PanelWrap::rebuild_if_needed(&mut cache, &source2, 20);
         assert!(Arc::ptr_eq(&cache.as_ref().unwrap().source, &source2));
+    }
+
+    #[test]
+    fn build_styled_records_plain_geometry_and_keeps_span_colours() {
+        use ratatui::style::{Color, Style};
+        // Two styled logical lines; spans carry colour that must survive.
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("key", Style::default().fg(Color::Green)),
+                Span::raw(": value"),
+            ]),
+            Line::from(vec![Span::styled(
+                "second",
+                Style::default().fg(Color::Blue),
+            )]),
+        ];
+        let w = PanelWrap::build_styled(&lines, 40);
+        // Geometry/copy see the plain concatenated text, not the styling.
+        assert_eq!(w.line_count(), 2);
+        assert_eq!(w.line_text(0), "key: value");
+        assert_eq!(w.line_char_len(0), 10);
+        assert_eq!(w.source(), "key: value\nsecond");
+        // Rendered rows keep their per-span colour.
+        let rows = w.visible_window(0, 2);
+        assert_eq!(row_text(&rows[0]), "key: value");
+        assert_eq!(rows[0].spans[0].content.as_ref(), "key");
+        assert_eq!(rows[0].spans[0].style.fg, Some(Color::Green));
+        assert_ne!(rows[0].spans[1].style.fg, Some(Color::Green));
+        assert_eq!(rows[1].spans[0].style.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn build_styled_colour_survives_wrapping() {
+        use ratatui::style::{Color, Style};
+        // "greenlong" (9 chars) all one colour, wrapped at width 4 -> 3 rows.
+        let lines = vec![Line::from(vec![Span::styled(
+            "greenlong",
+            Style::default().fg(Color::Green),
+        )])];
+        let w = PanelWrap::build_styled(&lines, 4);
+        assert_eq!(w.total_rows(), 3);
+        let rows = w.visible_window(0, 3);
+        assert_eq!(row_text(&rows[0]), "gree");
+        assert_eq!(rows[0].spans[0].style.fg, Some(Color::Green));
+        assert_eq!(row_text(&rows[2]), "g");
+        assert_eq!(rows[2].spans[0].style.fg, Some(Color::Green));
     }
 }
 
