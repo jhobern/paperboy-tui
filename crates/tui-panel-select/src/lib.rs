@@ -31,11 +31,21 @@
 //! - [`clipboard`] — `copy_to_clipboard` (local tool + OSC 52 fallback).
 //! - [`wrap`] — the underlying character-exact line-wrapping helpers.
 //!
+//! # Optional scrollbar
+//!
+//! With the default-on `scrollbar` feature, [`scrollbar`] adds a
+//! panel-agnostic vertical scrollbar: [`scroll_for_track_row`] maps a
+//! track click/drag to a scroll offset and [`render_scrollbar`] draws the
+//! thumb. [`MultiSelectPanel`] gains `scroll_to_track_row` /
+//! `render_scrollbar` convenience wrappers that plumb their own geometry in.
+//!
 //! [ratatui]: https://docs.rs/ratatui
 
 pub mod clipboard;
 pub mod multiselect;
 pub mod panel;
+#[cfg(feature = "scrollbar")]
+pub mod scrollbar;
 pub mod selection;
 #[cfg(feature = "terminal-guard")]
 pub mod terminal;
@@ -44,6 +54,8 @@ pub mod wrapcache;
 
 pub use multiselect::{AutoScroll, Motion, MultiSelectPanel};
 pub use panel::{MouseAction, MouseConfig, SelectablePanel};
+#[cfg(feature = "scrollbar")]
+pub use scrollbar::{ScrollbarStyle, render_scrollbar, scroll_for_track_row};
 #[cfg(feature = "terminal-guard")]
 pub use terminal::TerminalGuard;
 pub use wrapcache::{PanelWrap, TextPos, WrapMarker, WrapMode};

@@ -1,6 +1,6 @@
 [package]
 name = "tui-panel-select"
-version = "0.1.3"
+version = "0.1.4"
 description = "Panel-scoped mouse text selection and clipboard copy for ratatui apps"
 keywords = ["ratatui", "tui", "selection", "clipboard", "terminal"]
 categories = ["command-line-interface"]
@@ -16,11 +16,16 @@ base64.workspace = true
 ansi-to-tui = { workspace = true, optional = true }
 
 [features]
-default = ["terminal-guard"]
+default = ["terminal-guard", "scrollbar"]
 # Opt-in (default-on) panic-safe terminal mouse-capture guard. Disable it if
 # you only want the pure selection/wrapping logic and would rather not pull in
 # the process-global panic-hook and terminal side effects.
 terminal-guard = []
+# Opt-in (default-on) vertical scrollbar helpers: a panel-agnostic
+# `scroll_for_track_row` (track click/drag -> scroll offset) and
+# `render_scrollbar` (draw the thumb), plus `MultiSelectPanel` convenience
+# wrappers. Disable it if you draw your own scroll indicator.
+scrollbar = []
 # Opt-in ANSI-coloured content: `SelectablePanel::set_ansi_content` parses
 # ANSI escape sequences (via `ansi-to-tui`) so rendered rows keep their colour
 # while selection/copy continue to operate on the plain, stripped text.

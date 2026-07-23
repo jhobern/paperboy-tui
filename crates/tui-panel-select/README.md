@@ -136,6 +136,40 @@ let wrap_marker = WrapMarker::builder().glyph('>').build();
 panel.set_wrap_marker(wrap_marker);
 ```
 
+## Vertical scrollbar (feature `scrollbar`, on by default)
+
+Two panel-agnostic helpers wire up a native-feeling vertical scrollbar for any
+scrollable content:
+
+- `scroll_for_track_row(track, row, max_scroll)` maps a click or drag anywhere
+  in the scrollbar track to a scroll offset (proportional, clamped to the
+  track), so dragging the thumb — or clicking anywhere along it — jumps there.
+- `render_scrollbar(area, buf, total, capacity, start, &style)` draws a
+  ratatui scrollbar into a track column, sizing the thumb from the content
+  totals and no-op-ing when everything already fits.
+
+A `MultiSelectPanel` (which owns its scroll offset) has convenience wrappers
+that plumb their own geometry in:
+
+```rust,no_run
+# use tui_panel_select::{MultiSelectPanel, ScrollbarStyle};
+# use ratatui::{buffer::Buffer, layout::Rect, style::{Style, Color}};
+# fn demo(panel: &mut MultiSelectPanel, track: Rect, clicked_row: u16, buf: &mut Buffer) {
+// On a scrollbar click/drag: jump/scroll to that row.
+panel.scroll_to_track_row(track, clicked_row);
+
+// Each frame: draw the bar (styled to taste; a no-op when content fits).
+let style = ScrollbarStyle {
+    track_style: Style::default().fg(Color::DarkGray),
+    thumb_style: Style::default().fg(Color::Cyan),
+    ..ScrollbarStyle::default()
+};
+panel.render_scrollbar(track, buf, &style);
+# }
+```
+
+Disable the feature (`default-features = false`) if you draw your own indicator.
+
 ## ANSI-coloured content (feature `ansi`, off by default)
 
 If your panel text contains ANSI escape sequences (e.g. coloured program

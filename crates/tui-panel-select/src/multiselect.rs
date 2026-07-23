@@ -552,6 +552,42 @@ impl MultiSelectPanel {
     }
 }
 
+/// Scrollbar conveniences (default-on `scrollbar` feature): thin wrappers that
+/// plumb the panel's own geometry into the panel-agnostic
+/// [`crate::scrollbar`] helpers.
+#[cfg(feature = "scrollbar")]
+impl MultiSelectPanel {
+    /// Jump/scroll to the position a scrollbar-track click or drag at terminal
+    /// `row` maps to, given the `track` Rect (the panel's scrollbar column).
+    /// The track's height doubles as the viewport height for computing the
+    /// scrollable extent, so this stays correct between frames without any
+    /// cached `max_scroll`.
+    pub fn scroll_to_track_row(&mut self, track: ratatui::layout::Rect, row: u16) {
+        let max = self.max_scroll(track.height);
+        self.set_scroll(crate::scrollbar::scroll_for_track_row(track, row, max));
+    }
+
+    /// Render this panel's vertical scrollbar into `area` (its scrollbar
+    /// column) with `style`. A no-op when the content already fits, so it's
+    /// safe to call every frame; `area.height` is taken as the visible row
+    /// capacity.
+    pub fn render_scrollbar(
+        &self,
+        area: ratatui::layout::Rect,
+        buf: &mut ratatui::buffer::Buffer,
+        style: &crate::scrollbar::ScrollbarStyle,
+    ) {
+        crate::scrollbar::render_scrollbar(
+            area,
+            buf,
+            self.total_rows() as usize,
+            area.height as usize,
+            self.scroll() as usize,
+            style,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,5 +811,46 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let first_last = &rows[0].spans[rows[0].spans.len() - 1];
         assert_eq!(first_last.content, WrapMarker::default().glyph.to_string());
+    }
+
+    #[cfg(feature = "scrollbar")]
+    #[test]
+    fn scroll_to_track_row_maps_a_click_to_the_panels_scroll() {
+        // 40 one-char rows in a 10-row viewport -> max_scroll 30.
+        let body: String = (0..40).map(|i| format!("line{i}\n")).collect();
+        let mut p = panel(&body, 40);
+        // The scrollbar track is 10 rows tall (the viewport height).
+        let track = Rect::new(39, 0, 1, 10);
+        // A click at the very bottom of the track jumps to max scroll.
+        p.scroll_to_track_row(track, 9);
+        assert_eq!(p.scroll(), p.max_scroll(10));
+        // A click at the top returns to zero.
+        p.scroll_to_track_row(track, 0);
+        assert_eq!(p.scroll(), 0);
+    }
+
+    #[cfg(feature = "scrollbar")]
+    #[test]
+    fn render_scrollbar_paints_a_thumb_only_when_content_overflows() {
+        use crate::scrollbar::ScrollbarStyle;
+        use ratatui::buffer::Buffer;
+
+        let long: String = (0..40).map(|i| format!("line{i}\n")).collect();
+        let mut p = panel(&long, 40);
+        p.clamp_scroll(10);
+        let area = Rect::new(0, 0, 1, 10);
+        let mut buf = Buffer::empty(area);
+        p.render_scrollbar(area, &mut buf, &ScrollbarStyle::default());
+        let painted: String = (0..area.height)
+            .map(|y| buf[(0, y)].symbol().to_string())
+            .collect();
+        assert!(painted.contains('\u{2588}'), "overflowing content shows a thumb");
+
+        // A panel whose content fits draws nothing.
+        let mut short = panel("only one line", 40);
+        short.clamp_scroll(10);
+        let mut blank = Buffer::empty(area);
+        short.render_scrollbar(area, &mut blank, &ScrollbarStyle::default());
+        assert_eq!(blank, Buffer::empty(area));
     }
 }
