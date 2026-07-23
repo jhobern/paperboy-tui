@@ -12,6 +12,8 @@
 //! [`render_editor`] draws a scrolling (multi-line) view that follows the
 //! cursor and highlights any selection, while [`render_line_field`] draws a
 //! compact single-line field. Both can mask every character (for secrets).
+//! [`render_clipped_line`] renders a read-only, host-coloured line and shows a
+//! [`TruncationMarker`] (a dim `…` by default) when the text is cut off.
 //!
 //! The editor is deliberately unopinionated about its frame: it renders its
 //! *contents* into whatever [`Rect`] you give it, so the host keeps control of
@@ -34,7 +36,7 @@
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
@@ -52,6 +54,31 @@ pub struct EditorTheme {
     pub select_fg: Color,
     /// Background colour of selected text ([`render_editor`]).
     pub select_bg: Color,
+}
+
+/// Optional glyph drawn in the last column of a truncated single line
+/// ([`render_clipped_line`]) to indicate the text is wider than the area and
+/// has been cut off. Mirrors the wrap-marker concept: start from
+/// [`TruncationMarker::default`] (a dim ellipsis `…`) and override the
+/// [`glyph`](Self::glyph) / [`style`](Self::style) to taste.
+#[derive(Clone, Copy, Debug)]
+pub struct TruncationMarker {
+    /// The glyph drawn in the reserved last column (e.g. an ellipsis `…`).
+    /// Must be a single terminal cell wide.
+    pub glyph: char,
+    /// The style the glyph is drawn with — typically dim so it reads as an
+    /// annotation rather than content.
+    pub style: Style,
+}
+
+impl Default for TruncationMarker {
+    /// A dim ellipsis (`…`) — the conventional "there is more text" indicator.
+    fn default() -> Self {
+        Self {
+            glyph: '\u{2026}',
+            style: Style::default().add_modifier(Modifier::DIM),
+        }
+    }
 }
 
 /// A single- or multi-line text buffer with a cursor and optional selection.
@@ -332,16 +359,19 @@ pub fn render_editor(f: &mut Frame, area: Rect, ed: &Editor, style: &EditorTheme
         .skip(row_off)
         .take(h)
         .map(|l| {
-            let visible = l.chars().skip(col_off).take(w);
+            let visible = l.chars().skip(col_off).take(w + 1);
+
             let text: String = if masked {
                 // Mask each character so a secret is never shown while editing.
                 visible.map(|_| '\u{2022}').collect()
             } else {
                 visible.collect()
             };
+
             Line::from(text)
         })
         .collect();
+
     f.render_widget(
         Paragraph::new(lines).style(Style::default().fg(style.text)),
         area,
@@ -398,6 +428,7 @@ pub fn render_line_field(
     } else {
         text
     };
+
     let col_off = ed.col.saturating_sub(w.saturating_sub(1));
     let vis: String = shown.chars().skip(col_off).take(w).collect();
     let cell_style = if focused {
@@ -408,6 +439,49 @@ pub fn render_line_field(
     f.render_widget(Paragraph::new(vis).style(cell_style), area);
     if focused {
         f.set_cursor_position(Position::new(area.x + (ed.col - col_off) as u16, area.y));
+    }
+}
+
+/// Render a single, start-anchored line of read-only `text` into `area` in the
+/// given `color`, drawing `marker` in the last column when the text is wider
+/// than the area (i.e. it has been truncated). The text is clipped to the
+/// area's width by ratatui; only the fact that content was cut off is signalled
+/// by the marker.
+///
+/// Unlike [`render_line_field`], this takes a plain string and an explicit
+/// colour rather than an [`Editor`] and focus state, so the host controls the
+/// colour (e.g. a validity highlight) — it is intended for non-focused,
+/// read-only cells such as table columns. Width is measured in characters, so
+/// multi-byte text is handled correctly. Pass `marker: None` to render without
+/// any truncation indicator.
+pub fn render_clipped_line(
+    f: &mut Frame,
+    area: Rect,
+    text: &str,
+    color: Color,
+    marker: Option<TruncationMarker>,
+) {
+    if area.width == 0 {
+        return;
+    }
+    let w = area.width as usize;
+    f.render_widget(
+        Paragraph::new(text.to_string()).style(Style::default().fg(color)),
+        area,
+    );
+    if let Some(marker) = marker {
+        if text.chars().count() > w {
+            let last = Rect {
+                x: area.x + w as u16 - 1,
+                y: area.y,
+                width: 1,
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(marker.glyph.to_string()).style(marker.style),
+                last,
+            );
+        }
     }
 }
 
@@ -562,5 +636,45 @@ mod tests {
         let area = Rect::new(0, 0, 40, 3);
         assert_eq!(ed.point_to_row_col((3, 0), area), (0, 3));
         assert_eq!(ed.point_to_row_col((100, 1), area), (1, 6)); // clamps to line end
+    }
+
+    fn render_to_string<F: FnOnce(&mut Frame)>(w: u16, h: u16, f: F) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|frame| f(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn clipped_line_draws_marker_only_when_truncated() {
+        let area = Rect::new(0, 0, 5, 1);
+        let marker = Some(TruncationMarker::default());
+
+        // Fits: no marker, text shown verbatim.
+        let short = render_to_string(5, 1, |f| {
+            render_clipped_line(f, area, "abc", Color::White, marker);
+        });
+        assert_eq!(short, "abc  ");
+
+        // Too long: last visible column becomes the ellipsis marker.
+        let long = render_to_string(5, 1, |f| {
+            render_clipped_line(f, area, "abcdefgh", Color::White, marker);
+        });
+        assert_eq!(long, "abcd\u{2026}");
+
+        // Too long but no marker requested: plain clip, no ellipsis.
+        let plain = render_to_string(5, 1, |f| {
+            render_clipped_line(f, area, "abcdefgh", Color::White, None);
+        });
+        assert_eq!(plain, "abcde");
     }
 }
