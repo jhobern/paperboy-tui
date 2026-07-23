@@ -154,7 +154,14 @@ mod tests {
         let blank = Buffer::empty(area);
         assert_eq!(buf, blank);
         // Empty area -> also a no-op.
-        render_scrollbar(Rect::new(0, 0, 0, 0), &mut buf, 100, 10, 0, &ScrollbarStyle::default());
+        render_scrollbar(
+            Rect::new(0, 0, 0, 0),
+            &mut buf,
+            100,
+            10,
+            0,
+            &ScrollbarStyle::default(),
+        );
         assert_eq!(buf, blank);
     }
 

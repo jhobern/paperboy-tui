@@ -844,7 +844,10 @@ mod tests {
         let painted: String = (0..area.height)
             .map(|y| buf[(0, y)].symbol().to_string())
             .collect();
-        assert!(painted.contains('\u{2588}'), "overflowing content shows a thumb");
+        assert!(
+            painted.contains('\u{2588}'),
+            "overflowing content shows a thumb"
+        );
 
         // A panel whose content fits draws nothing.
         let mut short = panel("only one line", 40);
