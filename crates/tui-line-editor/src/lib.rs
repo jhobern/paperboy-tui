@@ -5,13 +5,17 @@
 //! mutators (`insert`, `backspace`, `left`/`right`/`up`/`down`, `home`/`end`,
 //! `newline`, …) so a host application can wire its own key handling and
 //! interleave editing with app-level logic, rather than delegating a whole
-//! event stream to the widget. An optional batteries-included
-//! [`apply_edit_key`] covers the common single-line case.
+//! event stream to the widget. Two batteries-included key handlers cover the
+//! common cases: [`apply_edit_key`] for a single-line field, and
+//! [`apply_edit_key_full`] for a selection-aware multi-line pane (returning an
+//! [`EditResponse`] describing what it changed / copied).
 //!
 //! Rendering is separate and fully styleable via [`EditorTheme`]:
 //! [`render_editor`] draws a scrolling (multi-line) view that follows the
-//! cursor and highlights any selection, while [`render_line_field`] draws a
-//! compact single-line field. Both can mask every character (for secrets).
+//! cursor and highlights any selection, [`render_editor_highlighted`] does the
+//! same from caller-supplied styled spans (for live syntax highlighting), and
+//! [`render_line_field`] draws a compact single-line field. Both plain renders
+//! can mask every character (for secrets).
 //! [`render_clipped_line`] renders a read-only, host-coloured line and shows a
 //! [`TruncationMarker`] (a dim `…` by default) when the text is cut off.
 //!
@@ -37,7 +41,7 @@ use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 /// Colours used when rendering an [`Editor`]. Build one from your application's
@@ -342,6 +346,82 @@ pub fn apply_edit_key(ed: &mut Editor, key: KeyEvent) {
     }
 }
 
+/// What an editing key handled by [`apply_edit_key_full`] did, so the host can
+/// react without re-inspecting the key.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EditResponse {
+    /// The key modified the editor's text (the host may want to re-validate,
+    /// mark the buffer dirty, resize, …).
+    pub changed: bool,
+    /// Ctrl+Y copied the active selection: the editor keeps no clipboard of its
+    /// own, so the host should place this text on *its* clipboard.
+    pub copy: Option<String>,
+}
+
+/// Apply one key to a (possibly multi-line) `ed`, covering the full
+/// selection-aware editing surface a plain text pane needs: typing, Backspace,
+/// Enter (a newline only in a multi-line editor), arrow movement with
+/// Shift-to-select and Ctrl+←/→ jump-to-edge, Home/End, and Ctrl+Y to copy the
+/// selection. Unlike the single-line [`apply_edit_key`], it reports its effect
+/// via [`EditResponse`] so a host can revalidate on change and own the
+/// clipboard.
+///
+/// Keys the editor doesn't own — Esc, a commit/submit key, application
+/// shortcuts, and Ctrl-modified character keys other than Ctrl+Y — are left
+/// untouched and yield a default (`changed == false`, `copy == None`)
+/// [`EditResponse`], so the host can still handle them itself.
+pub fn apply_edit_key_full(ed: &mut Editor, key: KeyEvent) -> EditResponse {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let mut resp = EditResponse::default();
+    match key.code {
+        // Copy first so a bare 'y' still types normally below.
+        KeyCode::Char('y') if ctrl => resp.copy = ed.selected_text(),
+        // Ignore other Ctrl+letter combos: they're app shortcuts, not text.
+        KeyCode::Char(c) if !ctrl => {
+            ed.clear_selection();
+            ed.insert(c);
+            resp.changed = true;
+        }
+        KeyCode::Enter if ed.multiline && !ctrl => {
+            ed.clear_selection();
+            ed.newline();
+            resp.changed = true;
+        }
+        KeyCode::Backspace => {
+            ed.clear_selection();
+            ed.backspace();
+            resp.changed = true;
+        }
+        KeyCode::Left => {
+            ed.set_selecting(shift);
+            if ctrl { ed.home() } else { ed.left() }
+        }
+        KeyCode::Right => {
+            ed.set_selecting(shift);
+            if ctrl { ed.end() } else { ed.right() }
+        }
+        KeyCode::Up => {
+            ed.set_selecting(shift);
+            ed.up();
+        }
+        KeyCode::Down => {
+            ed.set_selecting(shift);
+            ed.down();
+        }
+        KeyCode::Home => {
+            ed.clear_selection();
+            ed.home();
+        }
+        KeyCode::End => {
+            ed.clear_selection();
+            ed.end();
+        }
+        _ => {}
+    }
+    resp
+}
+
 /// Render a (possibly multi-line) editor into `area`, scrolling so the cursor
 /// stays visible, highlighting any selection, and placing the terminal cursor.
 /// When `masked`, every character is drawn as `•` (for secrets).
@@ -349,10 +429,7 @@ pub fn render_editor(f: &mut Frame, area: Rect, ed: &Editor, style: &EditorTheme
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let h = area.height as usize;
-    let w = area.width as usize;
-    let row_off = ed.row.saturating_sub(h - 1);
-    let col_off = ed.col.saturating_sub(w - 1);
+    let (row_off, col_off, h, w) = scroll_offsets(ed, area);
     let lines: Vec<Line> = ed
         .lines
         .iter()
@@ -376,36 +453,131 @@ pub fn render_editor(f: &mut Frame, area: Rect, ed: &Editor, style: &EditorTheme
         Paragraph::new(lines).style(Style::default().fg(style.text)),
         area,
     );
-    if let Some(((sr, sc), (er, ec))) = ed.selection_range() {
-        let buf = f.buffer_mut();
-        for screen_row in 0..h {
-            let line_idx = row_off + screen_row;
-            if line_idx >= ed.lines.len() || line_idx < sr || line_idx > er {
-                continue;
-            }
-            let len = ed.line_len(line_idx);
-            let (from, to) = if sr == er {
-                (sc, ec)
-            } else if line_idx == sr {
-                (sc, len)
-            } else if line_idx == er {
-                (0, ec)
-            } else {
-                (0, len)
-            };
-            for col in from.max(col_off)..to.min(col_off + w) {
-                let screen_col = col - col_off;
-                if let Some(cell) =
-                    buf.cell_mut((area.x + screen_col as u16, area.y + screen_row as u16))
-                {
-                    cell.set_style(Style::default().bg(style.select_bg).fg(style.select_fg));
-                }
+    paint_selection(f, area, ed, style);
+    place_cursor(f, area, ed, row_off, col_off);
+}
+
+/// Like [`render_editor`], but each logical line is drawn from caller-supplied
+/// styled [`Span`]s instead of one flat run — enabling live syntax highlighting
+/// while editing. `highlight(row, line)` is called for every *visible* logical
+/// line and must return spans that tile the whole line (their character lengths
+/// should sum to the line's length); the same horizontal-scroll window, cursor
+/// and selection overlay as [`render_editor`] are applied on top, so a
+/// selection still visually wins over the highlight on the selected cells.
+/// Masking is intentionally unsupported here (highlighted panes aren't secret).
+pub fn render_editor_highlighted(
+    f: &mut Frame,
+    area: Rect,
+    ed: &Editor,
+    style: &EditorTheme,
+    highlight: impl Fn(usize, &str) -> Vec<Span<'static>>,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (row_off, col_off, h, w) = scroll_offsets(ed, area);
+    let lines: Vec<Line> = ed
+        .lines
+        .iter()
+        .enumerate()
+        .skip(row_off)
+        .take(h)
+        .map(|(idx, l)| {
+            let spans = highlight(idx, l);
+            // Clip the styled spans to the same horizontal window a plain render
+            // would show (skip `col_off` chars, keep `w + 1`).
+            Line::from(slice_spans(&spans, col_off, col_off + w + 1))
+        })
+        .collect();
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(style.text)),
+        area,
+    );
+    paint_selection(f, area, ed, style);
+    place_cursor(f, area, ed, row_off, col_off);
+}
+
+/// The scroll offsets and viewport size [`render_editor`] uses: the cursor is
+/// kept on the last visible row/column, so the view follows it. Returns
+/// `(row_off, col_off, height, width)`.
+fn scroll_offsets(ed: &Editor, area: Rect) -> (usize, usize, usize, usize) {
+    let h = area.height as usize;
+    let w = area.width as usize;
+    (
+        ed.row.saturating_sub(h - 1),
+        ed.col.saturating_sub(w - 1),
+        h,
+        w,
+    )
+}
+
+/// Repaint the cells covered by the active selection with the theme's selection
+/// colours, on top of whatever the paragraph rendered.
+fn paint_selection(f: &mut Frame, area: Rect, ed: &Editor, style: &EditorTheme) {
+    let Some(((sr, sc), (er, ec))) = ed.selection_range() else {
+        return;
+    };
+    let (row_off, col_off, h, w) = scroll_offsets(ed, area);
+    let buf = f.buffer_mut();
+    for screen_row in 0..h {
+        let line_idx = row_off + screen_row;
+        if line_idx >= ed.lines.len() || line_idx < sr || line_idx > er {
+            continue;
+        }
+        let len = ed.line_len(line_idx);
+        let (from, to) = if sr == er {
+            (sc, ec)
+        } else if line_idx == sr {
+            (sc, len)
+        } else if line_idx == er {
+            (0, ec)
+        } else {
+            (0, len)
+        };
+        for col in from.max(col_off)..to.min(col_off + w) {
+            let screen_col = col - col_off;
+            if let Some(cell) =
+                buf.cell_mut((area.x + screen_col as u16, area.y + screen_row as u16))
+            {
+                cell.set_style(Style::default().bg(style.select_bg).fg(style.select_fg));
             }
         }
     }
+}
+
+/// Place the terminal cursor at the editor's cursor within `area`.
+fn place_cursor(f: &mut Frame, area: Rect, ed: &Editor, row_off: usize, col_off: usize) {
     let cx = area.x + (ed.col - col_off) as u16;
     let cy = area.y + (ed.row - row_off) as u16;
     f.set_cursor_position(Position::new(cx, cy));
+}
+
+/// Clip a line's styled spans to the character window `[start, end)`, splitting
+/// any span that straddles a boundary and preserving each piece's style. Used
+/// by [`render_editor_highlighted`] to apply horizontal scrolling to styled
+/// content the same way [`render_editor`] does to plain text.
+fn slice_spans(spans: &[Span], start: usize, end: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize; // char offset of the current span's start
+    for sp in spans {
+        let content = sp.content.as_ref();
+        let len = content.chars().count();
+        let sp_start = pos;
+        let sp_end = pos + len;
+        pos = sp_end;
+        if sp_end <= start {
+            continue;
+        }
+        if sp_start >= end {
+            break;
+        }
+        let from = start.max(sp_start) - sp_start;
+        let to = end.min(sp_end) - sp_start;
+        let text: String = content.chars().skip(from).take(to - from).collect();
+        out.push(Span::styled(text, sp.style));
+    }
+    out
 }
 
 /// Render a single-line editor's text into `area`, masking every character with
@@ -469,19 +641,19 @@ pub fn render_clipped_line(
         Paragraph::new(text.to_string()).style(Style::default().fg(color)),
         area,
     );
-    if let Some(marker) = marker {
-        if text.chars().count() > w {
-            let last = Rect {
-                x: area.x + w as u16 - 1,
-                y: area.y,
-                width: 1,
-                height: 1,
-            };
-            f.render_widget(
-                Paragraph::new(marker.glyph.to_string()).style(marker.style),
-                last,
-            );
-        }
+    if let Some(marker) = marker
+        && text.chars().count() > w
+    {
+        let last = Rect {
+            x: area.x + w as u16 - 1,
+            y: area.y,
+            width: 1,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(marker.glyph.to_string()).style(marker.style),
+            last,
+        );
     }
 }
 
@@ -676,5 +848,118 @@ mod tests {
             render_clipped_line(f, area, "abcdefgh", Color::White, None);
         });
         assert_eq!(plain, "abcde");
+    }
+
+    #[test]
+    fn apply_edit_key_full_types_navigates_and_reports_change() {
+        let mut ed = Editor::new("hi", true);
+        let r = apply_edit_key_full(
+            &mut ed,
+            KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE),
+        );
+        assert!(r.changed);
+        assert_eq!(r.copy, None);
+        assert_eq!(ed.text(), "hi!");
+
+        // Pure movement doesn't count as a text change.
+        let r = apply_edit_key_full(&mut ed, KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+        assert!(!r.changed);
+        assert_eq!(ed.col, 0);
+    }
+
+    #[test]
+    fn apply_edit_key_full_newline_only_in_multiline_mode() {
+        let mut multi = Editor::new("ab", true);
+        multi.home();
+        multi.right();
+        let r = apply_edit_key_full(
+            &mut multi,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(r.changed);
+        assert_eq!(multi.text(), "a\nb");
+
+        let mut single = Editor::new("ab", false);
+        single.home();
+        let r = apply_edit_key_full(
+            &mut single,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(!r.changed);
+        assert_eq!(single.text(), "ab");
+    }
+
+    #[test]
+    fn apply_edit_key_full_shift_arrow_selects_and_ctrl_y_copies() {
+        let mut ed = Editor::new("hello", true);
+        // Shift+Left twice selects the last two chars.
+        apply_edit_key_full(&mut ed, KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+        apply_edit_key_full(&mut ed, KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+        assert!(ed.sel_anchor.is_some());
+        let r = apply_edit_key_full(
+            &mut ed,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(r.copy.as_deref(), Some("lo"));
+        assert!(!r.changed);
+        assert_eq!(ed.text(), "hello"); // copy never mutates
+    }
+
+    #[test]
+    fn apply_edit_key_full_ignores_foreign_ctrl_combos() {
+        let mut ed = Editor::new("hi", true);
+        let r = apply_edit_key_full(
+            &mut ed,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(r, EditResponse::default());
+        assert_eq!(ed.text(), "hi"); // Ctrl+letter left for the host, not typed
+    }
+
+    #[test]
+    fn slice_spans_clips_to_a_char_window_keeping_styles() {
+        let green = Style::default().fg(Color::Green);
+        let spans = vec![Span::styled("keyword", green), Span::raw(" rest")];
+        // Window [3, 9) spans the "word" tail of the styled run and " r".
+        let out = slice_spans(&spans, 3, 9);
+        let text: String = out.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "word r");
+        assert_eq!(out[0].content.as_ref(), "word");
+        assert_eq!(out[0].style.fg, Some(Color::Green));
+        assert_eq!(out[1].content.as_ref(), " r");
+        assert_eq!(out[1].style.fg, None);
+    }
+
+    #[test]
+    fn render_editor_highlighted_paints_per_span_colours() {
+        let ed = Editor::new("REQUEST x", false);
+        let green = Style::default().fg(Color::Green);
+        let style = EditorTheme {
+            text: Color::White,
+            panel: Color::Black,
+            dim: Color::Gray,
+            select_fg: Color::Black,
+            select_bg: Color::Cyan,
+        };
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+        terminal
+            .draw(|f| {
+                render_editor_highlighted(f, Rect::new(0, 0, 20, 1), &ed, &style, |_, line| {
+                    // Colour a leading "REQUEST" keyword green, rest default.
+                    if let Some(rest) = line.strip_prefix("REQUEST") {
+                        vec![Span::styled("REQUEST", green), Span::raw(rest.to_string())]
+                    } else {
+                        vec![Span::raw(line.to_string())]
+                    }
+                });
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        // The keyword cells are green; a cell past it inherits the text colour.
+        assert_eq!(buffer.cell((0, 0)).unwrap().fg, Color::Green);
+        assert_eq!(buffer.cell((6, 0)).unwrap().fg, Color::Green);
+        assert_eq!(buffer.cell((8, 0)).unwrap().fg, Color::White);
     }
 }

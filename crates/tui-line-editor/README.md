@@ -11,15 +11,18 @@ masking) for [ratatui](https://docs.rs/ratatui) apps.
   `set_selecting`, `selection_range`, `selected_text`) with ordinary stream
   semantics across multiple lines.
 - **Masking** — render every character as `•` for secrets.
-- **Two renderers** — `render_editor` draws a scrolling multi-line view that
-  follows the cursor and highlights the selection; `render_line_field` draws a
-  compact single-line field. Both take an `EditorTheme` so you supply your own
-  colours.
+- **Three renderers** — `render_editor` draws a scrolling multi-line view that
+  follows the cursor and highlights the selection; `render_editor_highlighted`
+  does the same from caller-supplied styled spans (for live syntax
+  highlighting); `render_line_field` draws a compact single-line field. All take
+  an `EditorTheme` so you supply your own colours.
 - **Mouse mapping** — `point_to_row_col` maps a terminal point back to a
   `(row, col)` text position for click/drag selection.
-- **Batteries-included single-line key handler** — `apply_edit_key` covers the
-  common form-field case (typing, backspace, arrows, `Ctrl`+`←`/`→` for
-  home/end).
+- **Batteries-included key handlers** — `apply_edit_key` covers the common
+  single-line form-field case (typing, backspace, arrows, `Ctrl`+`←`/`→` for
+  home/end); `apply_edit_key_full` adds the selection-aware multi-line surface
+  (Shift+arrow to select, `Enter` for a newline, `Ctrl`+`Y` to copy) and reports
+  what it changed/copied via an `EditResponse`.
 
 ## Example
 
